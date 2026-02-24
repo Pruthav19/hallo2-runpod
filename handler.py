@@ -425,25 +425,37 @@ def handler(event):
             face_expand_ratio=float(input_data.get("face_expand_ratio", 1.2)),
         )
 
-        # ── Step 4: Optional enhancement ──
+        # ── Step 4: Upload raw video immediately (safety net) ──
+        raw_s3_key = f"generated_videos/{job_id}_raw.mp4"
+        raw_video_url = upload_to_s3(raw_video, raw_s3_key)
+        logger.info(f"Raw video uploaded: {raw_s3_key}")
+
+        # ── Step 5: Optional enhancement ──
+        enhanced_video_url = None
         if input_data.get("enhance", False):
-            final_video = os.path.join(job_dir, "output_enhanced.mp4")
-            enhance_video(raw_video, final_video)
-        else:
-            final_video = raw_video
+            try:
+                final_video = os.path.join(job_dir, "output_enhanced.mp4")
+                enhance_video(raw_video, final_video)
+                enhanced_s3_key = f"generated_videos/{job_id}_enhanced.mp4"
+                enhanced_video_url = upload_to_s3(final_video, enhanced_s3_key)
+                logger.info(f"Enhanced video uploaded: {enhanced_s3_key}")
+            except Exception as enhance_err:
+                logger.warning(f"Enhancement failed, returning raw video only: {enhance_err}")
 
-        # ── Step 5: Upload to S3 ──
-        s3_key = f"generated_videos/{job_id}.mp4"
-        video_url = upload_to_s3(final_video, s3_key)
-
+        # ── Step 6: Clean up ──
         subprocess.run(["rm", "-rf", job_dir], capture_output=True)
 
-        return {
-            "video_url": video_url,
+        result = {
+            "video_url": enhanced_video_url or raw_video_url,
+            "raw_video_url": raw_video_url,
             "duration_seconds": duration,
             "job_id": job_id,
             "status": "success",
         }
+        if enhanced_video_url:
+            result["enhanced_video_url"] = enhanced_video_url
+
+        return result
 
     except Exception as e:
         logger.exception("Handler error")
