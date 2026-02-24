@@ -145,8 +145,10 @@ def preprocess_avatar_image(image_path, output_path, target_size=512):
         cx = fx + fw // 2
         cy = fy + fh // 2
 
-        # Generous padding: 1.5× face side around centre so hairline + chin included
-        half = int(face_size * 1.5)
+        # Generous padding: face should occupy 50-70% of the final image
+        # (official Hallo2 requirement). With half = 0.85 × face_side the face
+        # fills ~59% of the 512×512 output after LANCZOS resize.
+        half = int(face_size * 0.85)
         x1 = max(cx - half, 0)
         y1 = max(cy - half, 0)
         x2 = min(cx + half, w)
@@ -177,7 +179,8 @@ def preprocess_avatar_image(image_path, output_path, target_size=512):
 
 def generate_talking_head(image_path, audio_path, output_path,
                            pose_weight=0.3, face_weight=0.3, lip_weight=0.8,
-                           inference_steps=20, cfg_scale=3.5):
+                           inference_steps=20, cfg_scale=3.5,
+                           face_expand_ratio=1.2):
     """Run Hallo2 inference to generate talking-head video."""
     import glob  # Required to search for the output video
     
@@ -201,6 +204,7 @@ def generate_talking_head(image_path, audio_path, output_path,
 
     config["inference_steps"] = inference_steps
     config["cfg_scale"] = cfg_scale
+    config["face_expand_ratio"] = face_expand_ratio
 
     config["save_path"] = hallo_out_dir  # Override the default save directory
     
@@ -398,6 +402,7 @@ def handler(event):
             lip_weight=float(input_data.get("lip_weight", 0.8)),
             inference_steps=int(input_data.get("inference_steps", 20)),
             cfg_scale=float(input_data.get("cfg_scale", 3.5)),
+            face_expand_ratio=float(input_data.get("face_expand_ratio", 1.2)),
         )
 
         # ── Step 4: Optional enhancement ──
