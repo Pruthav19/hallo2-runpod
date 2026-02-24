@@ -87,6 +87,11 @@ RUN pip install --timeout 300 --retries 5 "bitsandbytes>=0.45.0"
 RUN pip install -U --timeout 300 \
     "huggingface_hub>=0.25.0,<1.0"
 
+# ── Fix onnxruntime-gpu for CUDA 12.1 ──────────────────────────
+# Hallo2 pins onnxruntime-gpu==1.18.0 which was built against CUDA 11.8.
+# Container has CUDA 12.1 (libcublasLt.so.12). Upgrade to 1.19+ for CUDA 12.
+RUN pip install --timeout 300 --retries 5 "onnxruntime-gpu>=1.19.0"
+
 # ══════════════════════════════════════════════════════════════════
 # STEP 4: Verify stack at build time — visible in docker build log
 # ══════════════════════════════════════════════════════════════════

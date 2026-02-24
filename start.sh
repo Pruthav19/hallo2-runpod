@@ -12,14 +12,21 @@ echo "🚀 Starting Hallo2 RunPod Worker..."
 
 MODEL_DIR="${MODEL_DIR:-/runpod-volume/pretrained_models}"
 # InsightFace models are stored flat in face_analysis/models/ (name="" layout)
-FACE_ANALYSIS_MODELS_DIR="${MODEL_DIR}/face_analysis/models"
+FACE_LANDMARKER="${MODEL_DIR}/face_analysis/models/face_landmarker_v2_with_blendshapes.task"
 
-if [ ! -f "${MODEL_DIR}/.download_complete" ] || [ ! -d "${FACE_ANALYSIS_MODELS_DIR}" ]; then
+# ── Critical: symlink so Hallo2's hardcoded relative paths work ──────────────────
+# util.py hardcodes: pretrained_models/face_analysis/models/face_landmarker_v2_with_blendshapes.task
+# inference_long.py uses: ./pretrained_models/... relative to /app/hallo2
+# Symlinking makes all of Hallo2's relative paths resolve to MODEL_DIR.
+ln -sfn "${MODEL_DIR}" /app/hallo2/pretrained_models
+echo "🔗 Symlinked /app/hallo2/pretrained_models -> ${MODEL_DIR}"
+
+if [ ! -f "${MODEL_DIR}/.download_complete" ] || [ ! -f "${FACE_LANDMARKER}" ]; then
     echo "📥 First boot — downloading models to ${MODEL_DIR}..."
     echo "   This takes ~5-10 minutes on RunPod's network."
     echo "   Models will be cached on the network volume for future boots."
-    if [ -f "${MODEL_DIR}/.download_complete" ] && [ ! -d "${FACE_ANALYSIS_MODELS_DIR}" ]; then
-        echo "   Detected missing InsightFace models; repairing cache..."
+    if [ -f "${MODEL_DIR}/.download_complete" ] && [ ! -f "${FACE_LANDMARKER}" ]; then
+        echo "   Detected missing face_landmarker model; repairing cache..."
     fi
     
     python /app/download_models.py

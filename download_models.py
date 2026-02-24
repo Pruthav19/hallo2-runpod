@@ -88,14 +88,39 @@ def download_insightface_models():
     print("✅ InsightFace models ready at", models_dir)
 
 
-if __name__ == "__main__":
+def download_facelandmarker_model():
+    """Download MediaPipe face landmarker model required by Hallo2's util.py.
+
+    util.py hardcodes: pretrained_models/face_analysis/models/face_landmarker_v2_with_blendshapes.task
+    This must exist in {MODEL_DIR}/face_analysis/models/
+    """
+    models_dir = os.path.join(MODEL_DIR, "face_analysis", "models")
+    task_file = os.path.join(models_dir, "face_landmarker_v2_with_blendshapes.task")
+
+    if os.path.exists(task_file):
+        print("   face_landmarker model already present, skipping.")
+        return
+
+    os.makedirs(models_dir, exist_ok=True)
+    url = (
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+        "face_landmarker_v2_with_blendshapes/float16/1/"
+        "face_landmarker_v2_with_blendshapes.task"
+    )
+    print("📥 Downloading face_landmarker_v2_with_blendshapes.task...")
+    subprocess.run(
+        ["wget", "-q", "--timeout=300", "--tries=5", url, "-O", task_file],
+        check=True,
+    )
+    print("✅ face_landmarker model ready!")
+
+
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     try:
         download_hallo2_models()
         download_gfpgan_models()
-        download_insightface_models()
-        print("\n🎉 All models downloaded and ready!")
+        download_insightface_models()        download_facelandmarker_model()        print("\n🎉 All models downloaded and ready!")
     except Exception as e:
         print(f"\n❌ Model download failed: {e}", file=sys.stderr)
         sys.exit(1)
