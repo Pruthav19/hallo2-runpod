@@ -105,8 +105,78 @@ def get_audio_duration(audio_path):
     return float(result.stdout.strip())
 
 
-def generate_talking_head(image_path, audio_path, output_path, pose_weight=1.0,
-                           face_weight=1.0, lip_weight=1.5):
+def preprocess_avatar_image(image_path, output_path, target_size=512):
+    """
+    Prepare avatar image for Hallo2 inference:
+      1. Correct EXIF orientation
+      2. Convert to RGB (strips alpha, fixes CMYK/palette inputs)
+      3. Detect face with OpenCV Haar cascade → square-crop centered on face
+         (padding = 1.5× face side so neck/hair are included)
+      4. Fall back to centre-crop if no face is detected
+      5. Resize to target_size × target_size
+      6. Save as lossless PNG for maximum quality entering the model
+    """
+    import cv2
+    import numpy as np
+    from PIL import Image, ImageOps
+
+    # --- open & fix orientation ---
+    img = Image.open(image_path)
+    img = ImageOps.exif_transpose(img)          # honour EXIF rotation
+    img = img.convert("RGB")
+    w, h = img.size
+
+    # --- face detection ---
+    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    cascade = cv2.CascadeClassifier(cascade_path)
+    gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+
+    faces = cascade.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=4,
+        minSize=(64, 64),
+    )
+
+    if len(faces) > 0:
+        # Pick the largest detected face
+        fx, fy, fw, fh = max(faces, key=lambda r: r[2] * r[3])
+        face_size = max(fw, fh)
+        cx = fx + fw // 2
+        cy = fy + fh // 2
+
+        # Generous padding: 1.5× face side around centre so hairline + chin included
+        half = int(face_size * 1.5)
+        x1 = max(cx - half, 0)
+        y1 = max(cy - half, 0)
+        x2 = min(cx + half, w)
+        y2 = min(cy + half, h)
+        logger.info(f"Face detected at ({fx},{fy},{fw},{fh}) → crop ({x1},{y1},{x2},{y2})")
+    else:
+        # Fallback: centre-square crop
+        logger.warning("No face detected – falling back to centre-square crop")
+        side = min(w, h)
+        x1 = (w - side) // 2
+        y1 = (h - side) // 2
+        x2 = x1 + side
+        y2 = y1 + side
+
+    # --- square crop: pad with black if the crop would exceed image bounds ---
+    crop_w = x2 - x1
+    crop_h = y2 - y1
+    side = max(crop_w, crop_h)
+    square = Image.new("RGB", (side, side), (0, 0, 0))
+    square.paste(img.crop((x1, y1, x2, y2)), (0, 0))
+
+    # --- resize & save ---
+    out = square.resize((target_size, target_size), Image.LANCZOS)
+    out.save(output_path, format="PNG", optimize=False)
+    logger.info(f"Preprocessed avatar saved: {output_path} ({target_size}×{target_size})")
+    return output_path
+
+
+def generate_talking_head(image_path, audio_path, output_path, pose_weight=0.5,
+                           face_weight=0.5, lip_weight=1.0):
     """Run Hallo2 inference to generate talking-head video."""
     import glob  # Required to search for the output video
     
@@ -127,6 +197,11 @@ def generate_talking_head(image_path, audio_path, output_path, pose_weight=1.0,
     if not isinstance(config.get("face_analysis"), dict):
         config["face_analysis"] = {}
     config["face_analysis"]["model_path"] = face_analysis_root
+
+    # Speed: reduce inference steps from 40 → 20 (2x faster, minimal quality loss on fp16)
+    config["inference_steps"] = int(os.environ.get("INFERENCE_STEPS", "20"))
+    # Quality: reduce cfg_scale slightly to avoid over-saturation of motion
+    config["cfg_scale"] = float(os.environ.get("CFG_SCALE", "3.5"))
 
     config["save_path"] = hallo_out_dir  # Override the default save directory
     
@@ -238,8 +313,12 @@ def handler(event):
 
         # ── Step 1: Download avatar image ──
         image_ext = input_data["avatar_image_url"].split(".")[-1].split("?")[0]
-        image_path = os.path.join(job_dir, f"avatar.{image_ext}")
-        download_file(input_data["avatar_image_url"], image_path)
+        raw_image_path = os.path.join(job_dir, f"avatar_raw.{image_ext}")
+        download_file(input_data["avatar_image_url"], raw_image_path)
+
+        # ── Step 1b: Preprocess avatar (face crop, resize to 512×512, RGB PNG) ──
+        image_path = os.path.join(job_dir, "avatar.png")
+        preprocess_avatar_image(raw_image_path, image_path)
 
         # ── Step 2: Get or generate audio ──
         if input_data.get("audio_url"):
@@ -263,9 +342,9 @@ def handler(event):
             image_path=image_path,
             audio_path=wav_audio,
             output_path=raw_video,
-            pose_weight=input_data.get("pose_weight", 1.0),
-            face_weight=input_data.get("face_weight", 1.0),
-            lip_weight=input_data.get("lip_weight", 1.5),
+            pose_weight=input_data.get("pose_weight", 0.5),
+            face_weight=input_data.get("face_weight", 0.5),
+            lip_weight=input_data.get("lip_weight", 1.0),
         )
 
         # ── Step 4: Optional enhancement ──
