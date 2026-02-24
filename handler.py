@@ -206,6 +206,13 @@ def generate_talking_head(image_path, audio_path, output_path,
     config["cfg_scale"] = cfg_scale
     config["face_expand_ratio"] = face_expand_ratio
 
+    # Disable segment cutting for clips under 60 s — use_cut=True creates
+    # internal merge seams where face identity can shift between segments.
+    audio_duration = get_audio_duration(audio_path)
+    if audio_duration < 60:
+        config["use_cut"] = False
+        logger.info(f"Audio {audio_duration:.1f}s < 60s: use_cut disabled to prevent segment seams")
+
     config["save_path"] = hallo_out_dir  # Override the default save directory
     
     with open(job_config_path, "w") as f:
@@ -245,18 +252,14 @@ def generate_talking_head(image_path, audio_path, output_path,
     # Grab the first mp4 found (usually named merge_video.mp4)
     generated_video = mp4_files[0]
 
-    # ── Light temporal smoothing pass ─────────────────────────────────────────
-    # Hallo2's face-region compositing can leave subtle frame-to-frame boundary
-    # flicker.  A single-frame temporal blend (minterpolate blend or a mild
-    # spatial unsharp with negative amount) softens this without blurring detail.
+    # ── Mild edge-softening pass (no temporal blend) ──────────────────────────
+    # tblend was removed: averaging frames kills natural head micro-movement.
+    # Only apply a very subtle spatial softening to reduce face-mask hard edges.
     smoothed_video = output_path + "_smooth.mp4"
     smooth_result = subprocess.run(
         [
             "ffmpeg", "-y", "-i", generated_video,
-            "-vf",
-            # unsharp with amount<0 = very subtle softening of hard edges
-            # tblend=all_mode=average blends each frame with its neighbour
-            "tblend=all_mode=average,unsharp=lx=3:ly=3:la=-0.3:cx=3:cy=3:ca=0",
+            "-vf", "unsharp=lx=3:ly=3:la=-0.2:cx=3:cy=3:ca=0",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
             smoothed_video,
         ],
@@ -265,7 +268,7 @@ def generate_talking_head(image_path, audio_path, output_path,
     if smooth_result.returncode == 0 and os.path.exists(smoothed_video):
         os.rename(smoothed_video, output_path)
     else:
-        logger.warning("Temporal smoothing skipped: " + smooth_result.stderr[-200:])
+        logger.warning("Edge softening skipped: " + smooth_result.stderr[-200:])
         os.rename(generated_video, output_path)
 
     return output_path
