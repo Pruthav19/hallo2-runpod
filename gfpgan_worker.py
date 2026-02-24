@@ -8,8 +8,20 @@ Usage (called by handler.py):
 """
 import sys
 import os
-import cv2
+import types
 
+# ── Compatibility shim ────────────────────────────────────────────────────────
+# basicsr (pip-installed, used by gfpgan) still imports
+# `torchvision.transforms.functional_tensor` which was removed in torchvision
+# 0.16+.  We're on torchvision 0.21, so we inject a shim module that exposes
+# the functions basicsr needs from their new location.
+import torchvision.transforms.functional as _F
+_shim = types.ModuleType("torchvision.transforms.functional_tensor")
+_shim.rgb_to_grayscale = _F.rgb_to_grayscale
+sys.modules["torchvision.transforms.functional_tensor"] = _shim
+# ─────────────────────────────────────────────────────────────────────────────
+
+import cv2
 from gfpgan import GFPGANer
 
 frames_dir, enhanced_dir, model_path = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -40,3 +52,4 @@ for fname in frame_files:
     )
 
 print(f"Enhanced {len(frame_files)} frames", flush=True)
+
