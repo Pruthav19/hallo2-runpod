@@ -148,17 +148,6 @@ def generate_talking_head(image_path, audio_path, output_path, pose_weight=1.0,
     env["PRETRAINED_MODEL_DIR"] = MODEL_DIR
     env["INSIGHTFACE_HOME"] = os.path.join(MODEL_DIR, "insightface")
 
-    if torch.cuda.is_available():
-        capability = torch.cuda.get_device_capability(0)
-        force_cpu = os.environ.get("FORCE_CPU_ON_UNSUPPORTED_GPU", "0") == "1"
-        if force_cpu and capability >= (12, 0):
-            logger.warning(
-                "Detected CUDA capability %s.%s with older torch CUDA build; forcing CPU fallback.",
-                capability[0],
-                capability[1],
-            )
-            env["CUDA_VISIBLE_DEVICES"] = ""
-
     logger.info(f"Running Hallo2 inference: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=HALLO2_DIR, env=env)
 
