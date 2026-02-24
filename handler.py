@@ -175,8 +175,9 @@ def preprocess_avatar_image(image_path, output_path, target_size=512):
     return output_path
 
 
-def generate_talking_head(image_path, audio_path, output_path, pose_weight=0.5,
-                           face_weight=0.5, lip_weight=1.0):
+def generate_talking_head(image_path, audio_path, output_path,
+                           pose_weight=0.3, face_weight=0.3, lip_weight=0.8,
+                           inference_steps=20, cfg_scale=3.5):
     """Run Hallo2 inference to generate talking-head video."""
     import glob  # Required to search for the output video
     
@@ -198,10 +199,8 @@ def generate_talking_head(image_path, audio_path, output_path, pose_weight=0.5,
         config["face_analysis"] = {}
     config["face_analysis"]["model_path"] = face_analysis_root
 
-    # Speed: reduce inference steps from 40 → 20 (2x faster, minimal quality loss on fp16)
-    config["inference_steps"] = int(os.environ.get("INFERENCE_STEPS", "20"))
-    # Quality: reduce cfg_scale slightly to avoid over-saturation of motion
-    config["cfg_scale"] = float(os.environ.get("CFG_SCALE", "3.5"))
+    config["inference_steps"] = inference_steps
+    config["cfg_scale"] = cfg_scale
 
     config["save_path"] = hallo_out_dir  # Override the default save directory
     
@@ -246,36 +245,74 @@ def generate_talking_head(image_path, audio_path, output_path, pose_weight=0.5,
     return output_path
 
 def enhance_video(input_path, output_path):
-    """Optional: Enhance face quality using GFPGAN frame-by-frame."""
-    frames_dir = os.path.join(WORKSPACE, "frames")
-    enhanced_dir = os.path.join(WORKSPACE, "enhanced_frames")
+    """Enhance face quality using GFPGAN Python API (frame-by-frame)."""
+    import cv2
+    from gfpgan import GFPGANer
+
+    job_dir = os.path.dirname(output_path)
+    frames_dir = os.path.join(job_dir, "frames")
+    enhanced_dir = os.path.join(job_dir, "enhanced_frames")
     os.makedirs(frames_dir, exist_ok=True)
     os.makedirs(enhanced_dir, exist_ok=True)
 
-    subprocess.run([
-        "ffmpeg", "-y", "-i", input_path,
-        os.path.join(frames_dir, "frame_%05d.png")
-    ], check=True, capture_output=True)
+    # ── Get source FPS so the rebuilt video matches exactly ──
+    fps_result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=r_frame_rate",
+         "-of", "default=noprint_wrappers=1:nokey=1", input_path],
+        capture_output=True, text=True,
+    )
+    fps_str = fps_result.stdout.strip() or "25"   # e.g. "25/1" or "30000/1001"
 
-    subprocess.run([
-        "python", "-m", "gfpgan.inference_gfpgan",
-        "-i", frames_dir,
-        "-o", enhanced_dir,
-        "-v", "1.4",
-        "-s", "1",
-        "--only_center_face",
-        "--model_path", os.path.join(MODEL_DIR, "gfpgan", "GFPGANv1.4.pth"),
-    ], check=True, capture_output=True)
+    # ── Extract frames ──
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", input_path,
+         os.path.join(frames_dir, "frame_%05d.png")],
+        check=True, capture_output=True,
+    )
 
-    subprocess.run([
-        "ffmpeg", "-y",
-        "-framerate", "25",
-        "-i", os.path.join(enhanced_dir, "restored_imgs/frame_%05d.png"),
-        "-i", input_path,
-        "-map", "0:v", "-map", "1:a",
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        output_path
-    ], check=True, capture_output=True)
+    # ── Initialise GFPGAN restorer once (no subprocess, loads ~170 MB) ──
+    model_path = os.path.join(MODEL_DIR, "gfpgan", "GFPGANv1.4.pth")
+    restorer = GFPGANer(
+        model_path=model_path,
+        upscale=1,
+        arch="clean",
+        channel_multiplier=2,
+        bg_upsampler=None,   # skip background upsampling for speed
+    )
+    logger.info("GFPGANer loaded, processing frames...")
+
+    frame_files = sorted(
+        f for f in os.listdir(frames_dir) if f.endswith(".png")
+    )
+    for fname in frame_files:
+        src = os.path.join(frames_dir, fname)
+        img_bgr = cv2.imread(src)
+        _, _, restored = restorer.enhance(
+            img_bgr,
+            has_aligned=False,
+            only_center_face=True,
+            paste_back=True,
+        )
+        cv2.imwrite(
+            os.path.join(enhanced_dir, fname),
+            restored if restored is not None else img_bgr,
+        )
+
+    logger.info(f"Enhanced {len(frame_files)} frames, rebuilding video...")
+
+    # ── Reassemble video with original audio ──
+    subprocess.run(
+        ["ffmpeg", "-y",
+         "-r", fps_str,
+         "-i", os.path.join(enhanced_dir, "frame_%05d.png"),
+         "-i", input_path,
+         "-map", "0:v", "-map", "1:a",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p",
+         "-shortest",
+         output_path],
+        check=True, capture_output=True,
+    )
 
     return output_path
 
@@ -288,14 +325,25 @@ def handler(event):
     Expected input:
     {
         "input": {
-            "avatar_image_url": "https://...",         # REQUIRED
-            "text": "Hello, this is a test...",         # OPTIONAL (provide text OR audio_url)
-            "audio_url": "https://...",                 # OPTIONAL (provide text OR audio_url)
-            "voice": "en-US-JennyNeural",              # OPTIONAL: TTS voice
-            "pose_weight": 1.0,                        # OPTIONAL
-            "face_weight": 1.0,                        # OPTIONAL
-            "lip_weight": 1.5,                         # OPTIONAL
-            "enhance": false                           # OPTIONAL
+            "avatar_image_url": "https://...",  # REQUIRED
+            "text": "Hello...",                 # OPTIONAL – provide text OR audio_url
+            "audio_url": "https://...",         # OPTIONAL – provide text OR audio_url
+            "voice": "en-US-JennyNeural",       # OPTIONAL TTS voice (default: en-US-JennyNeural)
+
+            # ── Motion weights (0.0 – 1.0, lower = subtler) ──────────────────
+            "pose_weight": 0.3,     # head pose movement  (default: 0.3)
+            "face_weight": 0.3,     # facial expression   (default: 0.3)
+            "lip_weight":  0.8,     # lip sync strength   (default: 0.8)
+
+            # ── Quality / speed ──────────────────────────────────────────────
+            "inference_steps": 20,  # diffusion steps; 20=fast, 40=best (default: 20)
+            "cfg_scale": 3.5,       # classifier-free guidance scale  (default: 3.5)
+
+            # ── Image pre-processing ─────────────────────────────────────────
+            "target_size": 512,     # avatar resize resolution (default: 512)
+
+            # ── Post-processing ───────────────────────────────────────────────
+            "enhance": false        # GFPGAN face enhancement (default: false)
         }
     }
     """
@@ -316,9 +364,12 @@ def handler(event):
         raw_image_path = os.path.join(job_dir, f"avatar_raw.{image_ext}")
         download_file(input_data["avatar_image_url"], raw_image_path)
 
-        # ── Step 1b: Preprocess avatar (face crop, resize to 512×512, RGB PNG) ──
+        # ── Step 1b: Preprocess avatar (face crop, resize, RGB PNG) ──
         image_path = os.path.join(job_dir, "avatar.png")
-        preprocess_avatar_image(raw_image_path, image_path)
+        preprocess_avatar_image(
+            raw_image_path, image_path,
+            target_size=input_data.get("target_size", 512),
+        )
 
         # ── Step 2: Get or generate audio ──
         if input_data.get("audio_url"):
@@ -342,9 +393,11 @@ def handler(event):
             image_path=image_path,
             audio_path=wav_audio,
             output_path=raw_video,
-            pose_weight=input_data.get("pose_weight", 0.5),
-            face_weight=input_data.get("face_weight", 0.5),
-            lip_weight=input_data.get("lip_weight", 1.0),
+            pose_weight=float(input_data.get("pose_weight", 0.3)),
+            face_weight=float(input_data.get("face_weight", 0.3)),
+            lip_weight=float(input_data.get("lip_weight", 0.8)),
+            inference_steps=int(input_data.get("inference_steps", 20)),
+            cfg_scale=float(input_data.get("cfg_scale", 3.5)),
         )
 
         # ── Step 4: Optional enhancement ──
