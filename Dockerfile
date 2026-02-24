@@ -113,6 +113,7 @@ PY
 # ── Copy all handler files ───────────────────────────────────────
 COPY download_models.py /app/download_models.py
 COPY handler.py /app/handler.py
+COPY gfpgan_worker.py /app/gfpgan_worker.py
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 

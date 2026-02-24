@@ -249,10 +249,14 @@ def generate_talking_head(image_path, audio_path, output_path,
     return output_path
 
 def enhance_video(input_path, output_path):
-    """Enhance face quality using GFPGAN Python API (frame-by-frame)."""
-    import cv2
-    from gfpgan import GFPGANer
+    """Enhance face quality using GFPGAN (runs in isolated subprocess).
 
+    GFPGAN uses basicsr internally. Hallo2 ships its own bundled basicsr under
+    /app/hallo2/basicsr which is on PYTHONPATH.  Importing GFPGANer in the same
+    process triggers a double-registration of ResNetArcFace in basicsr's arch
+    registry and raises an AssertionError.  Running the enhancement in a child
+    process with /app/hallo2 stripped from PYTHONPATH avoids the collision.
+    """
     job_dir = os.path.dirname(output_path)
     frames_dir = os.path.join(job_dir, "frames")
     enhanced_dir = os.path.join(job_dir, "enhanced_frames")
@@ -266,7 +270,7 @@ def enhance_video(input_path, output_path):
          "-of", "default=noprint_wrappers=1:nokey=1", input_path],
         capture_output=True, text=True,
     )
-    fps_str = fps_result.stdout.strip() or "25"   # e.g. "25/1" or "30000/1001"
+    fps_str = fps_result.stdout.strip() or "25"
 
     # ── Extract frames ──
     subprocess.run(
@@ -275,35 +279,26 @@ def enhance_video(input_path, output_path):
         check=True, capture_output=True,
     )
 
-    # ── Initialise GFPGAN restorer once (no subprocess, loads ~170 MB) ──
+    # ── Run GFPGAN in a subprocess with Hallo2's basicsr removed from path ──
     model_path = os.path.join(MODEL_DIR, "gfpgan", "GFPGANv1.4.pth")
-    restorer = GFPGANer(
-        model_path=model_path,
-        upscale=1,
-        arch="clean",
-        channel_multiplier=2,
-        bg_upsampler=None,   # skip background upsampling for speed
-    )
-    logger.info("GFPGANer loaded, processing frames...")
+    worker_path = os.path.join(os.path.dirname(__file__), "gfpgan_worker.py")
 
-    frame_files = sorted(
-        f for f in os.listdir(frames_dir) if f.endswith(".png")
+    # Strip /app/hallo2 from PYTHONPATH so only the pip-installed basicsr is visible
+    clean_env = os.environ.copy()
+    pythonpath = clean_env.get("PYTHONPATH", "")
+    clean_env["PYTHONPATH"] = ":".join(
+        p for p in pythonpath.split(":") if p not in ("/app/hallo2", "")
     )
-    for fname in frame_files:
-        src = os.path.join(frames_dir, fname)
-        img_bgr = cv2.imread(src)
-        _, _, restored = restorer.enhance(
-            img_bgr,
-            has_aligned=False,
-            only_center_face=True,
-            paste_back=True,
-        )
-        cv2.imwrite(
-            os.path.join(enhanced_dir, fname),
-            restored if restored is not None else img_bgr,
-        )
 
-    logger.info(f"Enhanced {len(frame_files)} frames, rebuilding video...")
+    logger.info("Running GFPGAN enhancement in isolated subprocess...")
+    result = subprocess.run(
+        ["python", worker_path, frames_dir, enhanced_dir, model_path],
+        capture_output=True, text=True, env=clean_env,
+    )
+    if result.returncode != 0:
+        logger.error(f"GFPGAN worker STDERR: {result.stderr}")
+        raise RuntimeError(f"GFPGAN enhancement failed: {result.stderr[-500:]}")
+    logger.info(result.stdout.strip())
 
     # ── Reassemble video with original audio ──
     subprocess.run(
