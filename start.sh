@@ -11,14 +11,14 @@ echo "🚀 Starting Hallo2 RunPod Worker..."
 # ══════════════════════════════════════════════════════════════════
 
 MODEL_DIR="${MODEL_DIR:-/runpod-volume/pretrained_models}"
-INSIGHTFACE_MODEL_NAME="${INSIGHTFACE_MODEL_NAME:-buffalo_l}"
-INSIGHTFACE_MODEL_DIR="${MODEL_DIR}/insightface/models/${INSIGHTFACE_MODEL_NAME}"
+# InsightFace models are stored flat in face_analysis/models/ (name="" layout)
+FACE_ANALYSIS_MODELS_DIR="${MODEL_DIR}/face_analysis/models"
 
-if [ ! -f "${MODEL_DIR}/.download_complete" ] || [ ! -d "${INSIGHTFACE_MODEL_DIR}" ]; then
+if [ ! -f "${MODEL_DIR}/.download_complete" ] || [ ! -d "${FACE_ANALYSIS_MODELS_DIR}" ]; then
     echo "📥 First boot — downloading models to ${MODEL_DIR}..."
     echo "   This takes ~5-10 minutes on RunPod's network."
     echo "   Models will be cached on the network volume for future boots."
-    if [ -f "${MODEL_DIR}/.download_complete" ] && [ ! -d "${INSIGHTFACE_MODEL_DIR}" ]; then
+    if [ -f "${MODEL_DIR}/.download_complete" ] && [ ! -d "${FACE_ANALYSIS_MODELS_DIR}" ]; then
         echo "   Detected missing InsightFace models; repairing cache..."
     fi
     

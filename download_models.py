@@ -44,22 +44,48 @@ def download_gfpgan_models():
 
 
 def download_insightface_models():
-    """Download InsightFace model pack required by Hallo2 image processor."""
-    model_name = os.environ.get("INSIGHTFACE_MODEL_NAME", "buffalo_l")
-    insightface_root = os.path.join(MODEL_DIR, "insightface")
-    model_dir = os.path.join(insightface_root, "models", model_name)
+    """
+    Download InsightFace buffalo_l models for Hallo2.
 
-    if os.path.isdir(model_dir) and os.listdir(model_dir):
-        print(f"   InsightFace model '{model_name}' already exists, skipping.")
+    Hallo2's image_processor.py calls:
+        FaceAnalysis(name="", root=face_analysis_model_path)
+    InsightFace with name="" scans {root}/models/ for .onnx files directly.
+    So we download buffalo_l.zip and extract its contents flat into
+    {MODEL_DIR}/face_analysis/models/ (not into a buffalo_l subfolder).
+    """
+    import shutil
+    import urllib.request
+    import zipfile
+    import io
+
+    face_analysis_dir = os.path.join(MODEL_DIR, "face_analysis")
+    models_dir = os.path.join(face_analysis_dir, "models")
+
+    # Check if onnx files already present
+    if os.path.isdir(models_dir) and any(
+        f.endswith(".onnx") for f in os.listdir(models_dir)
+    ):
+        print("   InsightFace models already present, skipping.")
         return
 
-    print(f"📥 Downloading InsightFace model pack: {model_name}...")
-    os.makedirs(insightface_root, exist_ok=True)
+    os.makedirs(models_dir, exist_ok=True)
 
+    # Download buffalo_l using insightface's own downloader into a temp root,
+    # then flatten the onnx files up into models_dir so name="" can find them.
+    tmp_root = os.path.join(face_analysis_dir, "_tmp_download")
+    os.makedirs(tmp_root, exist_ok=True)
+
+    print("📥 Downloading InsightFace buffalo_l model pack...")
     from insightface.utils.storage import ensure_available
+    ensure_available("models", "buffalo_l", root=tmp_root)
 
-    ensure_available("models", model_name, root=insightface_root)
-    print("✅ InsightFace model downloaded!")
+    # Copy all files from buffalo_l/ directly into models/ (flat layout)
+    buffalo_src = os.path.join(tmp_root, "models", "buffalo_l")
+    for fname in os.listdir(buffalo_src):
+        shutil.copy2(os.path.join(buffalo_src, fname), models_dir)
+
+    shutil.rmtree(tmp_root)
+    print("✅ InsightFace models ready at", models_dir)
 
 
 if __name__ == "__main__":

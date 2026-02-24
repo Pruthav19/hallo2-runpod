@@ -119,13 +119,14 @@ def generate_talking_head(image_path, audio_path, output_path, pose_weight=1.0,
     with open(base_config_path, "r") as f:
         config = yaml.safe_load(f)
         
-    insightface_model_name = os.environ.get("INSIGHTFACE_MODEL_NAME", "buffalo_l")
-    face_analysis_cfg = config.get("face_analysis")
-    if isinstance(face_analysis_cfg, dict):
-        if not face_analysis_cfg.get("model_path"):
-            face_analysis_cfg["model_path"] = insightface_model_name
-    elif not config.get("face_analysis_model_path"):
-        config["face_analysis_model_path"] = insightface_model_name
+    # Hallo2's ImageProcessor calls FaceAnalysis(name="", root=face_analysis_model_path).
+    # InsightFace with name="" scans {root}/models/ for .onnx files directly.
+    # We must always override this to the absolute path where we placed the models,
+    # ignoring whatever relative path is in the base config YAML.
+    face_analysis_root = os.path.join(MODEL_DIR, "face_analysis")
+    if not isinstance(config.get("face_analysis"), dict):
+        config["face_analysis"] = {}
+    config["face_analysis"]["model_path"] = face_analysis_root
 
     config["save_path"] = hallo_out_dir  # Override the default save directory
     
