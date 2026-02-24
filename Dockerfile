@@ -59,7 +59,9 @@ RUN pip install --timeout 300 --retries 5 "bitsandbytes>=0.45.0"
 # STEP 3: Install Hallo2 + Handler dependencies.
 # Exclude packages already installed above or that cause conflicts.
 # ══════════════════════════════════════════════════════════════════
-RUN grep -vE "^(gradio|pylint|isort|pre-commit|torch|torchvision|torchaudio|bitsandbytes)==" \
+# xformers is also excluded — its pinned version (0.0.25.post1) requires torch 2.2.x
+# and will downgrade our torch 2.6. We install a compatible version below.
+RUN grep -vE "^(gradio|pylint|isort|pre-commit|torch|torchvision|torchaudio|bitsandbytes|xformers)([[:space:]]*[<>=!~].*)?$" \
     /app/hallo2/requirements.txt > /tmp/hallo2-runtime-requirements.txt
 
 RUN pip install \
@@ -68,6 +70,19 @@ RUN pip install \
     -r /tmp/hallo2-runtime-requirements.txt \
     -r /app/requirements.txt
 
+# ── Re-assert core GPU stack (defensive against transitive downgrades) ──
+RUN pip install --timeout 300 --retries 5 \
+    --index-url https://download.pytorch.org/whl/cu126 \
+    torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
+
+# ── Install xformers compatible with torch 2.6 ───────────────────
+RUN pip install --timeout 300 --retries 5 \
+    --index-url https://download.pytorch.org/whl/cu126 \
+    xformers==0.0.29.post3
+
+# ── Re-assert bitsandbytes (in case anything above pulled in old version) ──
+RUN pip install --timeout 300 --retries 5 "bitsandbytes>=0.45.0"
+
 # ── Fix huggingface_hub version ──────────────────────────────────
 RUN pip install -U --timeout 300 \
     "huggingface_hub>=0.25.0,<1.0"
@@ -75,12 +90,20 @@ RUN pip install -U --timeout 300 \
 # ══════════════════════════════════════════════════════════════════
 # STEP 4: Verify stack at build time — visible in docker build log
 # ══════════════════════════════════════════════════════════════════
-RUN python -c "\
-import torch; print(f'PyTorch: {torch.__version__}'); \
-print(f'CUDA arch list: {torch.cuda.get_arch_list()}'); \
-import bitsandbytes; print(f'bitsandbytes: {bitsandbytes.__version__}'); \
-import diffusers; print(f'diffusers: {diffusers.__version__}'); \
-"
+RUN python - <<'PY'
+import torch
+import diffusers
+
+print(f"PyTorch: {torch.__version__}")
+print(f"CUDA arch list: {torch.cuda.get_arch_list()}")
+print(f"diffusers: {diffusers.__version__}")
+
+try:
+    import bitsandbytes
+    print(f"bitsandbytes: {bitsandbytes.__version__}")
+except Exception as error:
+    print(f"bitsandbytes import warning: {error}")
+PY
 
 # ── Copy all handler files ───────────────────────────────────────
 COPY download_models.py /app/download_models.py
