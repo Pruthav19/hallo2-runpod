@@ -180,7 +180,7 @@ def preprocess_avatar_image(image_path, output_path, target_size=512):
 def generate_talking_head(image_path, audio_path, output_path,
                            pose_weight=0.3, face_weight=0.3, lip_weight=0.8,
                            inference_steps=20, cfg_scale=3.5,
-                           face_expand_ratio=1.2):
+                           face_expand_ratio=1.5):
     """Run Hallo2 inference to generate talking-head video."""
     import glob  # Required to search for the output video
     
@@ -244,7 +244,29 @@ def generate_talking_head(image_path, audio_path, output_path,
     
     # Grab the first mp4 found (usually named merge_video.mp4)
     generated_video = mp4_files[0]
-    os.rename(generated_video, output_path)
+
+    # ── Light temporal smoothing pass ─────────────────────────────────────────
+    # Hallo2's face-region compositing can leave subtle frame-to-frame boundary
+    # flicker.  A single-frame temporal blend (minterpolate blend or a mild
+    # spatial unsharp with negative amount) softens this without blurring detail.
+    smoothed_video = output_path + "_smooth.mp4"
+    smooth_result = subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", generated_video,
+            "-vf",
+            # unsharp with amount<0 = very subtle softening of hard edges
+            # tblend=all_mode=average blends each frame with its neighbour
+            "tblend=all_mode=average,unsharp=lx=3:ly=3:la=-0.3:cx=3:cy=3:ca=0",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+            smoothed_video,
+        ],
+        capture_output=True, text=True,
+    )
+    if smooth_result.returncode == 0 and os.path.exists(smoothed_video):
+        os.rename(smoothed_video, output_path)
+    else:
+        logger.warning("Temporal smoothing skipped: " + smooth_result.stderr[-200:])
+        os.rename(generated_video, output_path)
 
     return output_path
 
