@@ -271,12 +271,22 @@ def generate_talking_head(image_path, audio_path, output_path,
     fps_str = fps_result.stdout.strip() or "25"
     fps_num = fps_str.split("/")[0] if "/" in fps_str else fps_str.split(".")[0]
     fade_frames = max(6, round(int(fps_num) * 0.3))  # ~0.3 s worth of frames
+
+    # Filter chain:
+    #   1. fade-in from black (hides Hallo2's warm-up warp in first ~0.3 s)
+    #   2. 2× lanczos upscale  512×512 → 1024×1024  (huge perceived quality lift)
+    #   3. gentle sharpen to counteract upscale softness
+    vf_chain = (
+        f"fade=type=in:start_frame=0:nb_frames={fade_frames},"
+        f"scale=iw*2:ih*2:flags=lanczos,"
+        f"unsharp=5:5:0.7:5:5:0.0"
+    )
     postproc_result = subprocess.run(
         [
             "ffmpeg", "-y", "-i", generated_video,
-            "-vf", f"fade=type=in:start_frame=0:nb_frames={fade_frames}",
+            "-vf", vf_chain,
             "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-crf", "15", "-preset", "slow",
+            "-crf", "17", "-preset", "slow",
             "-c:a", "copy",
             postproc_video,
         ],
@@ -284,7 +294,7 @@ def generate_talking_head(image_path, audio_path, output_path,
     )
     if postproc_result.returncode == 0 and os.path.exists(postproc_video):
         os.rename(postproc_video, output_path)
-        logger.info(f"Post-processing applied (fade-in over {fade_frames} frames, CRF 15)")
+        logger.info(f"Post-processing applied (fade-in, 2× upscale, sharpen, CRF 17)")
     else:
         logger.warning("Post-processing skipped: " + postproc_result.stderr[-200:])
         os.rename(generated_video, output_path)
@@ -343,15 +353,16 @@ def enhance_video(input_path, output_path):
         raise RuntimeError(f"GFPGAN enhancement failed: {result.stderr[-500:]}")
     logger.info(result.stdout.strip())
 
-    # ── Reassemble video with original audio ──
+    # ── Reassemble video with original audio + 2× upscale + sharpen ──
     subprocess.run(
         ["ffmpeg", "-y",
          "-r", fps_str,
          "-i", os.path.join(enhanced_dir, "frame_%05d.png"),
          "-i", input_path,
          "-map", "0:v", "-map", "1:a",
+         "-vf", "scale=iw*2:ih*2:flags=lanczos,unsharp=5:5:0.7:5:5:0.0",
          "-c:v", "libx264", "-pix_fmt", "yuv420p",
-         "-crf", "15", "-preset", "slow",
+         "-crf", "17", "-preset", "slow",
          "-shortest",
          output_path],
         check=True, capture_output=True,
@@ -386,7 +397,7 @@ def handler(event):
             "target_size": 512,     # avatar resize resolution (default: 512)
 
             # ── Post-processing ───────────────────────────────────────────────
-            "enhance": false        # GFPGAN face enhancement (default: false)
+            "enhance": true         # GFPGAN face enhancement (default: true)
         }
     }
     """
@@ -441,7 +452,7 @@ def handler(event):
             lip_weight=float(input_data.get("lip_weight", 0.8)),
             inference_steps=int(input_data.get("inference_steps", 40)),
             cfg_scale=float(input_data.get("cfg_scale", 3.5)),
-            face_expand_ratio=float(input_data.get("face_expand_ratio", 1.2)),
+            face_expand_ratio=float(input_data.get("face_expand_ratio", 1.5)),
         )
 
         # ── Step 4: Upload raw video immediately (safety net) ──
@@ -451,7 +462,7 @@ def handler(event):
 
         # ── Step 5: Optional enhancement ──
         enhanced_video_url = None
-        if input_data.get("enhance", False):
+        if input_data.get("enhance", True):
             try:
                 final_video = os.path.join(job_dir, "output_enhanced.mp4")
                 enhance_video(raw_video, final_video)

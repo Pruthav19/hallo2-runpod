@@ -76,7 +76,7 @@ for fname in frame_files:
         weight=1.0,
     )
 
-    output = safe_blend(img_bgr, restored, strength=0.10, max_drift=20.0)
+    output = safe_blend(img_bgr, restored, strength=0.25, max_drift=25.0)
     if output is img_bgr:
         skipped += 1
     cv2.imwrite(os.path.join(enhanced_dir, fname), output)
