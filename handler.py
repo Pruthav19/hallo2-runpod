@@ -301,6 +301,53 @@ def generate_talking_head(image_path, audio_path, output_path,
 
     return output_path
 
+
+def apply_identity_lock(
+    pose_weight,
+    face_weight,
+    lip_weight,
+    face_expand_ratio,
+    inference_steps,
+    cfg_scale,
+    expression_boost=1.15,
+    enabled=True,
+):
+    """Tune settings for identity stability without making motion look frozen.
+
+    Earlier hard clamps fixed identity drift, but also made head movement and eye
+    blinking too subtle. This version keeps conservative ceilings while applying a
+    mild expression boost so videos remain lively.
+    """
+    if not enabled:
+        return {
+            "pose_weight": pose_weight,
+            "face_weight": face_weight,
+            "lip_weight": lip_weight,
+            "face_expand_ratio": face_expand_ratio,
+            "inference_steps": inference_steps,
+            "cfg_scale": cfg_scale,
+        }
+
+    # Keep boost in a safe range: enough to restore motion, not enough to cause drift.
+    boost = max(1.0, min(float(expression_boost), 1.35))
+
+    tuned = {
+        "pose_weight": min(pose_weight * boost, 0.30),
+        "face_weight": min(face_weight * boost, 0.34),
+        "lip_weight": min(lip_weight * min(boost, 1.2), 0.82),
+        "face_expand_ratio": min(face_expand_ratio, 1.42),
+        "inference_steps": max(inference_steps, 40),
+        "cfg_scale": min(cfg_scale, 3.3),
+    }
+    logger.info(
+        "Identity lock enabled. Effective settings: "
+        f"pose={tuned['pose_weight']}, face={tuned['face_weight']}, "
+        f"lip={tuned['lip_weight']}, face_expand_ratio={tuned['face_expand_ratio']}, "
+        f"steps={tuned['inference_steps']}, cfg={tuned['cfg_scale']}, "
+        f"expression_boost={boost}"
+    )
+    return tuned
+
 def enhance_video(input_path, output_path):
     """Enhance face quality using GFPGAN (runs in isolated subprocess).
 
@@ -397,7 +444,9 @@ def handler(event):
             "target_size": 512,     # avatar resize resolution (default: 512)
 
             # ── Post-processing ───────────────────────────────────────────────
-            "enhance": true         # GFPGAN face enhancement (default: true)
+            "enhance": false           # GFPGAN face enhancement (default: false)
+            "identity_lock": true      # clamp settings for stable identity
+            "expression_boost": 1.15   # raise blink/head motion while locked
         }
     }
     """
@@ -443,16 +492,28 @@ def handler(event):
 
         # ── Step 3: Generate talking-head video ──
         raw_video = os.path.join(job_dir, "output_raw.mp4")
-        generate_talking_head(
-            image_path=image_path,
-            audio_path=wav_audio,
-            output_path=raw_video,
+
+        tuned = apply_identity_lock(
             pose_weight=float(input_data.get("pose_weight", 0.3)),
             face_weight=float(input_data.get("face_weight", 0.3)),
             lip_weight=float(input_data.get("lip_weight", 0.8)),
             inference_steps=int(input_data.get("inference_steps", 40)),
             cfg_scale=float(input_data.get("cfg_scale", 3.5)),
             face_expand_ratio=float(input_data.get("face_expand_ratio", 1.5)),
+            expression_boost=float(input_data.get("expression_boost", 1.15)),
+            enabled=bool(input_data.get("identity_lock", True)),
+        )
+
+        generate_talking_head(
+            image_path=image_path,
+            audio_path=wav_audio,
+            output_path=raw_video,
+            pose_weight=tuned["pose_weight"],
+            face_weight=tuned["face_weight"],
+            lip_weight=tuned["lip_weight"],
+            inference_steps=tuned["inference_steps"],
+            cfg_scale=tuned["cfg_scale"],
+            face_expand_ratio=tuned["face_expand_ratio"],
         )
 
         # ── Step 4: Upload raw video immediately (safety net) ──
@@ -462,8 +523,13 @@ def handler(event):
 
         # ── Step 5: Optional enhancement ──
         enhanced_video_url = None
-        if input_data.get("enhance", True):
+        if input_data.get("enhance", False):
             try:
+                logger.warning(
+                    "GFPGAN enhancement is enabled. For strict identity stability, "
+                    "keep enhance=false because per-frame restoration can introduce "
+                    "temporal identity drift."
+                )
                 final_video = os.path.join(job_dir, "output_enhanced.mp4")
                 enhance_video(raw_video, final_video)
                 enhanced_s3_key = f"generated_videos/{job_id}_enhanced.mp4"
