@@ -252,23 +252,34 @@ def generate_talking_head(image_path, audio_path, output_path,
     # Grab the first mp4 found (usually named merge_video.mp4)
     generated_video = mp4_files[0]
 
-    # ── Mild edge-softening pass (no temporal blend) ──────────────────────────
-    # tblend was removed: averaging frames kills natural head micro-movement.
-    # Only apply a very subtle spatial softening to reduce face-mask hard edges.
-    smoothed_video = output_path + "_smooth.mp4"
-    smooth_result = subprocess.run(
+    # ── Post-processing: fade-in + quality re-encode ────────────────────────
+    # Hallo2 generates unstable / warped frames in the first ~0.3 s while the
+    # face animation warms up.  A short fade-in from the source image hides
+    # this completely.  We also re-encode at CRF 15 (high quality) without
+    # any blurring filter – the negative-luma unsharp that was here before was
+    # softening the image, which hurt rather than helped perceived quality.
+    #
+    # Filter chain:
+    #   fade=in:0:8  → fade from black over first 8 frames (~0.33 s at 25 fps)
+    postproc_video = output_path + "_postproc.mp4"
+    fps_num = fps_str.split("/")[0] if "/" in fps_str else fps_str.split(".")[0]
+    fade_frames = max(6, round(int(fps_num) * 0.3))  # ~0.3 s worth of frames
+    postproc_result = subprocess.run(
         [
             "ffmpeg", "-y", "-i", generated_video,
-            "-vf", "unsharp=lx=3:ly=3:la=-0.2:cx=3:cy=3:ca=0",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
-            smoothed_video,
+            "-vf", f"fade=type=in:start_frame=0:nb_frames={fade_frames}",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-crf", "15", "-preset", "slow",
+            "-c:a", "copy",
+            postproc_video,
         ],
         capture_output=True, text=True,
     )
-    if smooth_result.returncode == 0 and os.path.exists(smoothed_video):
-        os.rename(smoothed_video, output_path)
+    if postproc_result.returncode == 0 and os.path.exists(postproc_video):
+        os.rename(postproc_video, output_path)
+        logger.info(f"Post-processing applied (fade-in over {fade_frames} frames, CRF 15)")
     else:
-        logger.warning("Edge softening skipped: " + smooth_result.stderr[-200:])
+        logger.warning("Post-processing skipped: " + postproc_result.stderr[-200:])
         os.rename(generated_video, output_path)
 
     return output_path
@@ -333,6 +344,7 @@ def enhance_video(input_path, output_path):
          "-i", input_path,
          "-map", "0:v", "-map", "1:a",
          "-c:v", "libx264", "-pix_fmt", "yuv420p",
+         "-crf", "15", "-preset", "slow",
          "-shortest",
          output_path],
         check=True, capture_output=True,
@@ -360,7 +372,7 @@ def handler(event):
             "lip_weight":  0.8,     # lip sync strength   (default: 0.8)
 
             # ── Quality / speed ──────────────────────────────────────────────
-            "inference_steps": 20,  # diffusion steps; 20=fast, 40=best (default: 20)
+            "inference_steps": 40,  # diffusion steps; 20=fast, 40=best (default: 40)
             "cfg_scale": 3.5,       # classifier-free guidance scale  (default: 3.5)
 
             # ── Image pre-processing ─────────────────────────────────────────
@@ -420,7 +432,7 @@ def handler(event):
             pose_weight=float(input_data.get("pose_weight", 0.3)),
             face_weight=float(input_data.get("face_weight", 0.3)),
             lip_weight=float(input_data.get("lip_weight", 0.8)),
-            inference_steps=int(input_data.get("inference_steps", 20)),
+            inference_steps=int(input_data.get("inference_steps", 40)),
             cfg_scale=float(input_data.get("cfg_scale", 3.5)),
             face_expand_ratio=float(input_data.get("face_expand_ratio", 1.2)),
         )
