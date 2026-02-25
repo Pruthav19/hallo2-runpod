@@ -301,6 +301,49 @@ def generate_talking_head(image_path, audio_path, output_path,
 
     return output_path
 
+
+def apply_identity_lock(
+    pose_weight,
+    face_weight,
+    lip_weight,
+    face_expand_ratio,
+    inference_steps,
+    cfg_scale,
+    enabled=True,
+):
+    """Clamp motion settings to reduce identity drift between frames.
+
+    Hallo2 quality issues that look like "a different person" are often caused by
+    aggressive motion controls and overly wide crops that give the model too much
+    freedom to reinterpret facial structure. This helper enforces conservative
+    defaults while still allowing users to pass lower values explicitly.
+    """
+    if not enabled:
+        return {
+            "pose_weight": pose_weight,
+            "face_weight": face_weight,
+            "lip_weight": lip_weight,
+            "face_expand_ratio": face_expand_ratio,
+            "inference_steps": inference_steps,
+            "cfg_scale": cfg_scale,
+        }
+
+    tuned = {
+        "pose_weight": min(pose_weight, 0.22),
+        "face_weight": min(face_weight, 0.22),
+        "lip_weight": min(lip_weight, 0.75),
+        "face_expand_ratio": min(face_expand_ratio, 1.35),
+        "inference_steps": max(inference_steps, 40),
+        "cfg_scale": min(cfg_scale, 3.2),
+    }
+    logger.info(
+        "Identity lock enabled. Effective settings: "
+        f"pose={tuned['pose_weight']}, face={tuned['face_weight']}, "
+        f"lip={tuned['lip_weight']}, face_expand_ratio={tuned['face_expand_ratio']}, "
+        f"steps={tuned['inference_steps']}, cfg={tuned['cfg_scale']}"
+    )
+    return tuned
+
 def enhance_video(input_path, output_path):
     """Enhance face quality using GFPGAN (runs in isolated subprocess).
 
@@ -397,7 +440,8 @@ def handler(event):
             "target_size": 512,     # avatar resize resolution (default: 512)
 
             # ── Post-processing ───────────────────────────────────────────────
-            "enhance": true         # GFPGAN face enhancement (default: true)
+            "enhance": false        # GFPGAN face enhancement (default: false)
+            "identity_lock": true   # clamp settings for stable identity
         }
     }
     """
@@ -443,16 +487,27 @@ def handler(event):
 
         # ── Step 3: Generate talking-head video ──
         raw_video = os.path.join(job_dir, "output_raw.mp4")
-        generate_talking_head(
-            image_path=image_path,
-            audio_path=wav_audio,
-            output_path=raw_video,
+
+        tuned = apply_identity_lock(
             pose_weight=float(input_data.get("pose_weight", 0.3)),
             face_weight=float(input_data.get("face_weight", 0.3)),
             lip_weight=float(input_data.get("lip_weight", 0.8)),
             inference_steps=int(input_data.get("inference_steps", 40)),
             cfg_scale=float(input_data.get("cfg_scale", 3.5)),
             face_expand_ratio=float(input_data.get("face_expand_ratio", 1.5)),
+            enabled=bool(input_data.get("identity_lock", True)),
+        )
+
+        generate_talking_head(
+            image_path=image_path,
+            audio_path=wav_audio,
+            output_path=raw_video,
+            pose_weight=tuned["pose_weight"],
+            face_weight=tuned["face_weight"],
+            lip_weight=tuned["lip_weight"],
+            inference_steps=tuned["inference_steps"],
+            cfg_scale=tuned["cfg_scale"],
+            face_expand_ratio=tuned["face_expand_ratio"],
         )
 
         # ── Step 4: Upload raw video immediately (safety net) ──
@@ -462,8 +517,13 @@ def handler(event):
 
         # ── Step 5: Optional enhancement ──
         enhanced_video_url = None
-        if input_data.get("enhance", True):
+        if input_data.get("enhance", False):
             try:
+                logger.warning(
+                    "GFPGAN enhancement is enabled. For strict identity stability, "
+                    "keep enhance=false because per-frame restoration can introduce "
+                    "temporal identity drift."
+                )
                 final_video = os.path.join(job_dir, "output_enhanced.mp4")
                 enhance_video(raw_video, final_video)
                 enhanced_s3_key = f"generated_videos/{job_id}_enhanced.mp4"
