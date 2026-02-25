@@ -309,14 +309,14 @@ def apply_identity_lock(
     face_expand_ratio,
     inference_steps,
     cfg_scale,
-    expression_boost=1.15,
     enabled=True,
 ):
-    """Tune settings for identity stability without making motion look frozen.
+    """Clamp motion settings to reduce identity drift between frames.
 
-    Earlier hard clamps fixed identity drift, but also made head movement and eye
-    blinking too subtle. This version keeps conservative ceilings while applying a
-    mild expression boost so videos remain lively.
+    Hallo2 quality issues that look like "a different person" are often caused by
+    aggressive motion controls and overly wide crops that give the model too much
+    freedom to reinterpret facial structure. This helper enforces conservative
+    defaults while still allowing users to pass lower values explicitly.
     """
     if not enabled:
         return {
@@ -328,23 +328,19 @@ def apply_identity_lock(
             "cfg_scale": cfg_scale,
         }
 
-    # Keep boost in a safe range: enough to restore motion, not enough to cause drift.
-    boost = max(1.0, min(float(expression_boost), 1.35))
-
     tuned = {
-        "pose_weight": min(pose_weight * boost, 0.30),
-        "face_weight": min(face_weight * boost, 0.34),
-        "lip_weight": min(lip_weight * min(boost, 1.2), 0.82),
-        "face_expand_ratio": min(face_expand_ratio, 1.42),
+        "pose_weight": min(pose_weight, 0.22),
+        "face_weight": min(face_weight, 0.22),
+        "lip_weight": min(lip_weight, 0.75),
+        "face_expand_ratio": min(face_expand_ratio, 1.35),
         "inference_steps": max(inference_steps, 40),
-        "cfg_scale": min(cfg_scale, 3.3),
+        "cfg_scale": min(cfg_scale, 3.2),
     }
     logger.info(
         "Identity lock enabled. Effective settings: "
         f"pose={tuned['pose_weight']}, face={tuned['face_weight']}, "
         f"lip={tuned['lip_weight']}, face_expand_ratio={tuned['face_expand_ratio']}, "
-        f"steps={tuned['inference_steps']}, cfg={tuned['cfg_scale']}, "
-        f"expression_boost={boost}"
+        f"steps={tuned['inference_steps']}, cfg={tuned['cfg_scale']}"
     )
     return tuned
 
@@ -444,9 +440,8 @@ def handler(event):
             "target_size": 512,     # avatar resize resolution (default: 512)
 
             # ── Post-processing ───────────────────────────────────────────────
-            "enhance": false           # GFPGAN face enhancement (default: false)
-            "identity_lock": true      # clamp settings for stable identity
-            "expression_boost": 1.15   # raise blink/head motion while locked
+            "enhance": false        # GFPGAN face enhancement (default: false)
+            "identity_lock": true   # clamp settings for stable identity
         }
     }
     """
@@ -500,7 +495,6 @@ def handler(event):
             inference_steps=int(input_data.get("inference_steps", 40)),
             cfg_scale=float(input_data.get("cfg_scale", 3.5)),
             face_expand_ratio=float(input_data.get("face_expand_ratio", 1.5)),
-            expression_boost=float(input_data.get("expression_boost", 1.15)),
             enabled=bool(input_data.get("identity_lock", True)),
         )
 
