@@ -262,6 +262,13 @@ def generate_talking_head(image_path, audio_path, output_path,
     # Filter chain:
     #   fade=in:0:8  → fade from black over first 8 frames (~0.33 s at 25 fps)
     postproc_video = output_path + "_postproc.mp4"
+    fps_result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=r_frame_rate",
+         "-of", "default=noprint_wrappers=1:nokey=1", generated_video],
+        capture_output=True, text=True,
+    )
+    fps_str = fps_result.stdout.strip() or "25"
     fps_num = fps_str.split("/")[0] if "/" in fps_str else fps_str.split(".")[0]
     fade_frames = max(6, round(int(fps_num) * 0.3))  # ~0.3 s worth of frames
     postproc_result = subprocess.run(
