@@ -178,8 +178,8 @@ def preprocess_avatar_image(image_path, output_path, target_size=512):
 
 
 def generate_talking_head(image_path, audio_path, output_path,
-                           pose_weight=0.3, face_weight=0.3, lip_weight=0.8,
-                           inference_steps=20, cfg_scale=3.5,
+                           pose_weight=0.5, face_weight=0.5, lip_weight=1.0,
+                           inference_steps=40, cfg_scale=3.5,
                            face_expand_ratio=1.5):
     """Run Hallo2 inference to generate talking-head video."""
     import glob  # Required to search for the output video
@@ -311,12 +311,12 @@ def apply_identity_lock(
     cfg_scale,
     enabled=True,
 ):
-    """Clamp motion settings to reduce identity drift between frames.
+    """Guard-rail motion settings to prevent extreme values.
 
-    Hallo2 quality issues that look like "a different person" are often caused by
-    aggressive motion controls and overly wide crops that give the model too much
-    freedom to reinterpret facial structure. This helper enforces conservative
-    defaults while still allowing users to pass lower values explicitly.
+    When enabled, this prevents users from setting weights so high that
+    Hallo2 generates wild/distorted motion, while still allowing natural
+    expression levels.  The caps are generous — identity consistency is
+    now mainly handled by the GFPGAN drift guard in the enhancement step.
     """
     if not enabled:
         return {
@@ -329,12 +329,12 @@ def apply_identity_lock(
         }
 
     tuned = {
-        "pose_weight": min(pose_weight, 0.22),
-        "face_weight": min(face_weight, 0.22),
-        "lip_weight": min(lip_weight, 0.75),
-        "face_expand_ratio": min(face_expand_ratio, 1.35),
-        "inference_steps": max(inference_steps, 40),
-        "cfg_scale": min(cfg_scale, 3.2),
+        "pose_weight": min(pose_weight, 0.8),
+        "face_weight": min(face_weight, 0.8),
+        "lip_weight": min(lip_weight, 1.2),
+        "face_expand_ratio": min(face_expand_ratio, 1.8),
+        "inference_steps": max(inference_steps, 30),
+        "cfg_scale": min(cfg_scale, 5.0),
     }
     logger.info(
         "Identity lock enabled. Effective settings: "
@@ -375,8 +375,9 @@ def enhance_video(input_path, output_path):
         check=True, capture_output=True,
     )
 
-    # ── Run GFPGAN in a subprocess with Hallo2's basicsr removed from path ──
+    # ── Run GFPGAN + Real-ESRGAN in a subprocess with Hallo2's basicsr removed ──
     model_path = os.path.join(MODEL_DIR, "gfpgan", "GFPGANv1.4.pth")
+    realesrgan_model_path = os.path.join(MODEL_DIR, "gfpgan", "RealESRGAN_x2plus.pth")
     worker_path = os.path.join(os.path.dirname(__file__), "gfpgan_worker.py")
 
     # Strip /app/hallo2 from PYTHONPATH so only the pip-installed basicsr is visible
@@ -386,9 +387,12 @@ def enhance_video(input_path, output_path):
         p for p in pythonpath.split(":") if p not in ("/app/hallo2", "")
     )
 
-    logger.info("Running GFPGAN enhancement in isolated subprocess...")
+    logger.info("Running GFPGAN + Real-ESRGAN enhancement in isolated subprocess...")
+    worker_cmd = ["python", worker_path, frames_dir, enhanced_dir, model_path]
+    if os.path.exists(realesrgan_model_path):
+        worker_cmd.append(realesrgan_model_path)
     result = subprocess.run(
-        ["python", worker_path, frames_dir, enhanced_dir, model_path],
+        worker_cmd,
         capture_output=True, text=True, env=clean_env,
     )
     if result.returncode != 0:
@@ -396,14 +400,16 @@ def enhance_video(input_path, output_path):
         raise RuntimeError(f"GFPGAN enhancement failed: {result.stderr[-500:]}")
     logger.info(result.stdout.strip())
 
-    # ── Reassemble video with original audio + 2× upscale + sharpen ──
+    # ── Reassemble video with original audio ──
+    # GFPGAN+Real-ESRGAN already outputs 2× upscaled frames (1024×1024)
+    # so we just encode them directly — no extra upscale filter needed.
     subprocess.run(
         ["ffmpeg", "-y",
          "-r", fps_str,
          "-i", os.path.join(enhanced_dir, "frame_%05d.png"),
          "-i", input_path,
          "-map", "0:v", "-map", "1:a",
-         "-vf", "scale=iw*2:ih*2:flags=lanczos,unsharp=5:5:0.7:5:5:0.0",
+         "-vf", "unsharp=5:5:0.5:5:5:0.0",
          "-c:v", "libx264", "-pix_fmt", "yuv420p",
          "-crf", "17", "-preset", "slow",
          "-shortest",
@@ -428,9 +434,9 @@ def handler(event):
             "voice": "en-US-JennyNeural",       # OPTIONAL TTS voice (default: en-US-JennyNeural)
 
             # ── Motion weights (0.0 – 1.0, lower = subtler) ──────────────────
-            "pose_weight": 0.3,     # head pose movement  (default: 0.3)
-            "face_weight": 0.3,     # facial expression   (default: 0.3)
-            "lip_weight":  0.8,     # lip sync strength   (default: 0.8)
+            "pose_weight": 0.5,     # head pose movement  (default: 0.5)
+            "face_weight": 0.5,     # facial expression   (default: 0.5)
+            "lip_weight":  1.0,     # lip sync strength   (default: 1.0)
 
             # ── Quality / speed ──────────────────────────────────────────────
             "inference_steps": 40,  # diffusion steps; 20=fast, 40=best (default: 40)
@@ -440,8 +446,8 @@ def handler(event):
             "target_size": 512,     # avatar resize resolution (default: 512)
 
             # ── Post-processing ───────────────────────────────────────────────
-            "enhance": false        # GFPGAN face enhancement (default: false)
-            "identity_lock": true   # clamp settings for stable identity
+            "enhance": true         # GFPGAN + Real-ESRGAN 2× (default: true)
+            "identity_lock": true   # guard-rail extreme values (default: true)
         }
     }
     """
@@ -489,9 +495,9 @@ def handler(event):
         raw_video = os.path.join(job_dir, "output_raw.mp4")
 
         tuned = apply_identity_lock(
-            pose_weight=float(input_data.get("pose_weight", 0.3)),
-            face_weight=float(input_data.get("face_weight", 0.3)),
-            lip_weight=float(input_data.get("lip_weight", 0.8)),
+            pose_weight=float(input_data.get("pose_weight", 0.5)),
+            face_weight=float(input_data.get("face_weight", 0.5)),
+            lip_weight=float(input_data.get("lip_weight", 1.0)),
             inference_steps=int(input_data.get("inference_steps", 40)),
             cfg_scale=float(input_data.get("cfg_scale", 3.5)),
             face_expand_ratio=float(input_data.get("face_expand_ratio", 1.5)),
@@ -515,15 +521,10 @@ def handler(event):
         raw_video_url = upload_to_s3(raw_video, raw_s3_key)
         logger.info(f"Raw video uploaded: {raw_s3_key}")
 
-        # ── Step 5: Optional enhancement ──
+        # ── Step 5: Enhancement (GFPGAN + Real-ESRGAN 2× upscale) ──
         enhanced_video_url = None
-        if input_data.get("enhance", False):
+        if input_data.get("enhance", True):
             try:
-                logger.warning(
-                    "GFPGAN enhancement is enabled. For strict identity stability, "
-                    "keep enhance=false because per-frame restoration can introduce "
-                    "temporal identity drift."
-                )
                 final_video = os.path.join(job_dir, "output_enhanced.mp4")
                 enhance_video(raw_video, final_video)
                 enhanced_s3_key = f"generated_videos/{job_id}_enhanced.mp4"

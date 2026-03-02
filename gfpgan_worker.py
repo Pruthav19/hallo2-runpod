@@ -1,10 +1,17 @@
 """
-Standalone GFPGAN worker – run as a subprocess with /app/hallo2 removed from
-PYTHONPATH so that GFPGAN's own basicsr does not clash with Hallo2's bundled
-basicsr registry (which would cause 'ResNetArcFace already registered' errors).
+Standalone GFPGAN + Real-ESRGAN worker – run as a subprocess with /app/hallo2
+removed from PYTHONPATH so that GFPGAN's own basicsr does not clash with
+Hallo2's bundled basicsr registry.
+
+Pipeline per frame:
+  1. Real-ESRGAN 2× neural super-resolution (background + non-face areas)
+  2. GFPGAN face restoration at native resolution → paste back at 2×
+  3. Blend 35 % restored / 65 % original-upscaled (drift guard: skip if Δ>28)
+
+Output is 1024×1024 when input is 512×512.
 
 Usage (called by handler.py):
-    python /app/gfpgan_worker.py <frames_dir> <enhanced_dir> <model_path>
+    python /app/gfpgan_worker.py <frames_dir> <enhanced_dir> <model_path> [realesrgan_model_path]
 """
 import sys
 import os
@@ -21,38 +28,66 @@ if "torchvision.transforms.functional_tensor" not in sys.modules:
 
 import cv2
 import numpy as np
+import torch
 from gfpgan import GFPGANer
 
-frames_dir, enhanced_dir, model_path = sys.argv[1], sys.argv[2], sys.argv[3]
+frames_dir = sys.argv[1]
+enhanced_dir = sys.argv[2]
+model_path = sys.argv[3]
+realesrgan_model_path = sys.argv[4] if len(sys.argv) > 4 else None
 
 os.makedirs(enhanced_dir, exist_ok=True)
 
+# ── Build Real-ESRGAN background upsampler ───────────────────────────────────
+bg_upsampler = None
+if realesrgan_model_path and os.path.exists(realesrgan_model_path):
+    from basicsr.archs.rrdbnet_arch import RRDBNet
+    from realesrgan import RealESRGANer
+
+    rrdb_net = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64,
+                       num_block=23, num_grow_ch=32, scale=2)
+    bg_upsampler = RealESRGANer(
+        scale=2,
+        model_path=realesrgan_model_path,
+        dni_weight=None,
+        model=rrdb_net,
+        tile=400,           # tile-based processing to save VRAM
+        tile_pad=10,
+        pre_pad=0,
+        half=True,          # FP16 for speed
+    )
+    print(f"Real-ESRGAN 2× upsampler loaded from {realesrgan_model_path}", flush=True)
+else:
+    print("Real-ESRGAN model not found – falling back to GFPGAN at 1×", flush=True)
+
+# ── Build GFPGAN restorer ────────────────────────────────────────────────────
+upscale_factor = 2 if bg_upsampler else 1
 restorer = GFPGANer(
     model_path=model_path,
-    upscale=1,
+    upscale=upscale_factor,
     arch="clean",
     channel_multiplier=2,
-    bg_upsampler=None,
+    bg_upsampler=bg_upsampler,
 )
 
+
 def safe_blend(original: np.ndarray, restored: np.ndarray,
-               strength: float = 0.10, max_drift: float = 20.0) -> np.ndarray:
+               strength: float = 0.35, max_drift: float = 28.0) -> np.ndarray:
     """
-    Blend GFPGAN restoration onto the original frame at low strength, with a
+    Blend GFPGAN+Real-ESRGAN restoration onto the (upscaled) original with a
     per-frame drift guard.
 
-    strength=0.10: GFPGAN contributes 10%, original 90%.
-
-    max_drift=20.0: if the mean-absolute-difference between the GFPGAN output
-    and the original exceeds this value (on a 0–255 scale), the frame is
-    considered "drifted" and the original is returned untouched.  This stops
-    the handful of frames where GFPGAN hallucinates noticeably different facial
-    features from ever appearing in the final video.
+    strength  = 0.35  → 35 % restored, 65 % original
+    max_drift = 28.0  → skip frames where GFPGAN hallucinated too much
     """
     if restored is None:
         return original
 
-    # Drift guard — skip enhancement when GFPGAN changed the face too much
+    # If GFPGAN upscaled, we need to upscale the original to match for blending
+    if restored.shape[:2] != original.shape[:2]:
+        original = cv2.resize(original, (restored.shape[1], restored.shape[0]),
+                              interpolation=cv2.INTER_LANCZOS4)
+
     diff = np.mean(np.abs(restored.astype(np.float32) - original.astype(np.float32)))
     if diff > max_drift:
         return original
@@ -66,8 +101,6 @@ for fname in frame_files:
     src = os.path.join(frames_dir, fname)
     img_bgr = cv2.imread(src)
 
-    # GFPGANer.enhance() returns (cropped_faces, restored_faces, restored_img)
-    # cropped_faces/restored_faces are numpy arrays, not bbox dicts.
     _, _, restored = restorer.enhance(
         img_bgr,
         has_aligned=False,
@@ -76,10 +109,11 @@ for fname in frame_files:
         weight=1.0,
     )
 
-    output = safe_blend(img_bgr, restored, strength=0.25, max_drift=25.0)
+    output = safe_blend(img_bgr, restored, strength=0.35, max_drift=28.0)
     if output is img_bgr:
         skipped += 1
     cv2.imwrite(os.path.join(enhanced_dir, fname), output)
 
-print(f"Enhanced {len(frame_files)} frames ({skipped} skipped due to drift guard)", flush=True)
+print(f"Enhanced {len(frame_files)} frames ({skipped} skipped due to drift guard) "
+      f"[upscale={upscale_factor}×, blend=35%]", flush=True)
 

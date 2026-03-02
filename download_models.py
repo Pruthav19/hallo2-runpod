@@ -25,22 +25,34 @@ def download_hallo2_models():
 
 
 def download_gfpgan_models():
-    """Download GFPGAN v1.4 model for face enhancement."""
-    print("📥 Downloading GFPGAN model...")
+    """Download GFPGAN v1.4 model and RealESRGAN x2plus for face enhancement."""
+    print("📥 Downloading GFPGAN + RealESRGAN models...")
     gfpgan_dir = os.path.join(MODEL_DIR, "gfpgan")
     os.makedirs(gfpgan_dir, exist_ok=True)
 
+    # ── GFPGAN v1.4 ──
     gfpgan_path = os.path.join(gfpgan_dir, "GFPGANv1.4.pth")
     if os.path.exists(gfpgan_path):
         print("   GFPGAN model already exists, skipping.")
-        return
+    else:
+        subprocess.run([
+            "wget", "-q", "--timeout=300", "--tries=5",
+            "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth",
+            "-O", gfpgan_path,
+        ], check=True)
+        print("✅ GFPGAN model downloaded!")
 
-    subprocess.run([
-        "wget", "-q", "--timeout=300", "--tries=5",
-        "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth",
-        "-O", gfpgan_path,
-    ], check=True)
-    print("✅ GFPGAN model downloaded!")
+    # ── RealESRGAN x2plus (background upsampler for 2× neural super-res) ──
+    realesrgan_path = os.path.join(gfpgan_dir, "RealESRGAN_x2plus.pth")
+    if os.path.exists(realesrgan_path):
+        print("   RealESRGAN x2plus model already exists, skipping.")
+    else:
+        subprocess.run([
+            "wget", "-q", "--timeout=300", "--tries=5",
+            "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+            "-O", realesrgan_path,
+        ], check=True)
+        print("✅ RealESRGAN x2plus model downloaded!")
 
 
 def download_insightface_models():
