@@ -132,7 +132,9 @@ def download_facelandmarker_model():
     try:
         download_hallo2_models()
         download_gfpgan_models()
-        download_insightface_models()        download_facelandmarker_model()        print("\n🎉 All models downloaded and ready!")
+        download_insightface_models()        
+        download_facelandmarker_model()        
+        print("\n🎉 All models downloaded and ready!")
     except Exception as e:
         print(f"\n❌ Model download failed: {e}", file=sys.stderr)
         sys.exit(1)
